@@ -1,0 +1,221 @@
+name: Build unsigned iOS IPA
+
+# Триггеры:
+#  - workflow_dispatch: ручной запуск из вкладки Actions (выбор версии Flutter и нужен ли Release)
+#  - push: автоматическая сборка на каждый коммит в основную ветку
+#
+# Внимание: в этом репозитории основная ветка называется master. Указаны обе ветки,
+# поэтому workflow продолжит работать после переименования master -> main.
+on:
+  workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: 'Версия Flutter SDK'
+        required: false
+        default: '3.41.6'
+        type: string
+      make_release:
+        description: 'Создать GitHub Release с .ipa (иначе только artifact)'
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches:
+      - main
+      - master
+    # Не пересобираем приложение из-за правок документации.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+# Сборка не подписывается, но Release создаётся — нужен доступ на запись к содержимому репозитория.
+permissions:
+  contents: write
+
+# Две одновременные сборки одной ветки не нужны: новая отменяет предыдущую.
+concurrency:
+  group: ios-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Версия зафиксирована для воспроизводимости: проект собран на Flutter 3.41.6 (Dart 3.11.4).
+  FLUTTER_VERSION: ${{ inputs.flutter_version || '3.41.6' }}
+  # Промежуточное имя файла; финальное формируется с версией из pubspec.yaml.
+  IPA_NAME: flutter_test_app-unsigned.ipa
+
+jobs:
+  build-ios:
+    name: Build unsigned IPA (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          # Кэширует Flutter SDK и ~/.pub-cache (pub-кэш включается вместе с cache: true).
+          cache: true
+
+      - name: Show toolchain versions
+        run: |
+          flutter --version
+          echo "--- Xcode ---"
+          xcodebuild -version
+          xcode-select -p
+          echo "--- CocoaPods ---"
+          pod --version || echo "CocoaPods пока не установлен"
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # Кэш CocoaPods: спецификации и уже установленные Pods.
+      # Сейчас Podfile.lock отсутствует (плагинов нет), поэтому hashFiles вернёт пустую
+      # строку — ключ останется стабильным, а кэш будет восстанавливаться по restore-keys.
+      - name: Cache CocoaPods
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ios/Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pods-
+
+      - name: Ensure CocoaPods is available
+        run: |
+          if ! command -v pod >/dev/null 2>&1; then
+            echo "CocoaPods не найден на раннере — устанавливаю через RubyGems..."
+            sudo gem install cocoapods --no-document
+          fi
+          pod --version
+
+      # ВАЖНО: в pubspec.yaml нет плагинов с нативным кодом, поэтому Flutter не создаёт
+      # Podfile и не запускает CocoaPods. Шаг честно пропускает pod install вместо
+      # падения с "No Podfile found in the project directory".
+      - name: CocoaPods install (only if Podfile exists)
+        run: |
+          cd ios
+          if [ -f Podfile ]; then
+            echo "Podfile найден — устанавливаю зависимости CocoaPods."
+            pod install
+          else
+            echo "ios/Podfile отсутствует: в проекте нет плагинов с нативным кодом."
+            echo "CocoaPods не используется. Как только появится первый плагин"
+            echo "(например, shared_preferences), Flutter создаст Podfile сам,"
+            echo "и этот шаг начнёт выполняться автоматически."
+          fi
+
+      # --no-codesign — сборка без подписи: .ipa подпишет SideStore вашим Apple ID на устройстве.
+      - name: Build iOS (release, no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Determine app version
+        id: app_version
+        run: |
+          RAW_VERSION=$(grep -m1 '^version:' pubspec.yaml | awk '{print $2}')
+          # Убираем символ "+" из build-номера: он неудобен в именах файлов и URL.
+          SAFE_VERSION="${RAW_VERSION//+/-}"
+          echo "raw=$RAW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "safe=$SAFE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Версия приложения: $RAW_VERSION (в имени файла: $SAFE_VERSION)"
+
+      # Упаковка .app в .ipa: в корне архива обязана лежать папка Payload с Runner.app.
+      - name: Package unsigned .ipa
+        run: |
+          set -euo pipefail
+
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Ошибка: не найден $APP_PATH — сборка не создала .app." >&2
+            ls -la build/ios/ || true
+            exit 1
+          fi
+
+          rm -rf build/ios/ipa_payload build/ios/unsigned
+          mkdir -p build/ios/ipa_payload/Payload build/ios/unsigned
+          cp -R "$APP_PATH" build/ios/ipa_payload/Payload/
+
+          # -y обязателен: без него zip разворачивает симлинки внутри .app и приложение не запустится.
+          (cd build/ios/ipa_payload && zip -qry "../unsigned/${IPA_NAME}" Payload)
+
+          echo "Готовый файл:"
+          ls -lh build/ios/unsigned/
+
+      - name: Verify .ipa structure
+        run: |
+          set -euo pipefail
+          IPA="build/ios/unsigned/${IPA_NAME}"
+          echo "Содержимое архива (первые 15 записей):"
+          unzip -l "$IPA" | head -15
+          echo "--- Ключевые проверки ---"
+          unzip -l "$IPA" | grep -q 'Payload/Runner.app/Runner' \
+            && echo "OK: Payload/Runner.app/Runner на месте" \
+            || { echo "Ошибка: исполняемый файл приложения не найден в архиве" >&2; exit 1; }
+          unzip -l "$IPA" | grep -q 'Payload/Runner.app/Info.plist' \
+            && echo "OK: Info.plist на месте" \
+            || { echo "Ошибка: Info.plist не найден в архиве" >&2; exit 1; }
+
+      - name: Rename .ipa with version
+        run: |
+          set -euo pipefail
+          mv "build/ios/unsigned/${IPA_NAME}" \
+             "build/ios/unsigned/flutter_test_app-${{ steps.app_version.outputs.safe }}-unsigned.ipa"
+          ls -lh build/ios/unsigned/
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: flutter-test-app-unsigned-ipa
+          path: build/ios/unsigned/*.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      # Публикация в Releases: так .ipa можно скачать прямо на iPhone по обычной ссылке
+      # (Actions-артефакты требуют авторизации в GitHub — на телефоне это неудобно).
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.make_release == true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_VERSION: ${{ steps.app_version.outputs.raw }}
+        run: |
+          set -euo pipefail
+
+          TAG="ios-build-${GITHUB_RUN_NUMBER}"
+          IPA_FILE=$(ls build/ios/unsigned/*.ipa | head -1)
+
+          NOTES=$(cat <<EOF
+          Неподписанный (unsigned) .ipa сборки Flutter-приложения.
+
+          - Версия приложения: ${APP_VERSION}
+          - Flutter: ${FLUTTER_VERSION}
+          - Коммит: ${GITHUB_SHA}
+          - Подпись не выполняется: её делает SideStore на устройстве.
+
+          Как установить на iPhone (iOS 15+):
+          1. Откройте эту страницу в Safari на iPhone и скачайте \`.ipa\` — файл попадёт в приложение «Файлы».
+          2. Включите LocalDevVPN и Wi-Fi.
+          3. SideStore → My Apps → «+» → выберите скачанный .ipa.
+          4. Первый запуск: Настройки → Основные → VPN и управление устройством → доверьте сертификату Apple ID.
+
+          Бесплатный Apple ID: 3 приложения всего (включая сам SideStore), 7 дней до переподписи.
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Релиз $TAG уже существует — перезаливаю файл сборки."
+            gh release upload "$TAG" "$IPA_FILE" --clobber
+          else
+            gh release create "$TAG" "$IPA_FILE" \
+              --target "$GITHUB_SHA" \
+              --title "iOS unsigned build #${GITHUB_RUN_NUMBER} (v${APP_VERSION})" \
+              --notes "$NOTES"
+          fi
+
+          echo "Ссылка для скачивания на iPhone:"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$IPA_FILE")"

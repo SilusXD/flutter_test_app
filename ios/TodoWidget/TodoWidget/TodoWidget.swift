@@ -18,6 +18,10 @@ struct TodoEntry: TimelineEntry {
     /// Сколько задач ещё не выполнено.
     let pending: Int
 
+    /// Доступен ли общий контейнер App Group. Нужно, чтобы отличать «задач нет»
+    /// от «приложение не может делиться данными» — это разные диагнозы.
+    let sharedStorageAvailable: Bool
+
     var total: Int { items.count }
 
     static let placeholder = TodoEntry(
@@ -27,10 +31,25 @@ struct TodoEntry: TimelineEntry {
             TodoItem(id: "2", title: "Позвонить маме", done: true),
             TodoItem(id: "3", title: "Сдать отчёт", done: false),
         ],
-        pending: 2
+        pending: 2,
+        sharedStorageAvailable: true
     )
 
-    static let empty = TodoEntry(date: Date(), items: [], pending: 0)
+    /// Контейнер доступен, но задач нет.
+    static let empty = TodoEntry(
+        date: Date(),
+        items: [],
+        pending: 0,
+        sharedStorageAvailable: true
+    )
+
+    /// Общий контейнер недоступен: App Group не активирована.
+    static let unavailable = TodoEntry(
+        date: Date(),
+        items: [],
+        pending: 0,
+        sharedStorageAvailable: false
+    )
 }
 
 /// Структура JSON, которую пишет Flutter (ключ `todos_json`).
@@ -53,13 +72,28 @@ enum TodoSharedStorage {
     static let jsonKey = "todos_json"
     static let pendingKey = "todos_pending"
 
+    /// Выдала ли система URL общего контейнера.
+    ///
+    /// Если entitlement `com.apple.security.application-groups` не применён при
+    /// подписи, контейнера нет — и это надёжный признак, что приложение и виджет
+    /// физически не могут обмениваться данными.
+    static var isContainerAvailable: Bool {
+        FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupId
+        ) != nil
+    }
+
     static func load() -> TodoEntry {
+        guard isContainerAvailable else {
+            return .unavailable
+        }
+
         guard
             let defaults = UserDefaults(suiteName: appGroupId),
             let raw = defaults.string(forKey: jsonKey),
             let data = raw.data(using: .utf8)
         else {
-            // Контейнер недоступен или данных ещё нет.
+            // Контейнер есть, но приложение ещё ничего не записало.
             return .empty
         }
 
@@ -70,7 +104,12 @@ enum TodoSharedStorage {
             }
             let storedPending = defaults.object(forKey: pendingKey) as? Int
             let pending = storedPending ?? items.filter { !$0.done }.count
-            return TodoEntry(date: Date(), items: items, pending: pending)
+            return TodoEntry(
+                date: Date(),
+                items: items,
+                pending: pending,
+                sharedStorageAvailable: true
+            )
         } catch {
             return .empty
         }
@@ -126,12 +165,21 @@ struct TodoWidgetEntryView: View {
 
             if entry.items.isEmpty {
                 Spacer(minLength: 0)
-                Text("Задач пока нет")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Text("Добавьте их в приложении")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                if entry.sharedStorageAvailable {
+                    Text("Задач пока нет")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("Добавьте их в приложении")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text("Нет доступа к общему хранилищу")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("App Group не активирована")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer(minLength: 0)
             } else {
                 VStack(alignment: .leading, spacing: 4) {

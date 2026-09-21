@@ -4,6 +4,44 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/todo.dart';
 
+/// Результат публикации задач в виджет.
+///
+/// Показывается прямо в приложении: без Mac логи посмотреть негде, а по одному
+/// лишь пустому виджету невозможно понять, в чём причина — нет данных или
+/// недоступен общий контейнер.
+enum WidgetSyncStatus {
+  /// Платформа не iOS — виджета на главном экране нет.
+  notApplicable,
+
+  /// Данные легли в общий контейнер и успешно прочитаны обратно.
+  synced,
+
+  /// Запись выполнена, но прочитать её обратно не удалось: почти наверняка
+  /// App Group не активирована (например, при бесплатном Apple ID).
+  notShared,
+
+  /// Плагин вернул ошибку при записи.
+  failed;
+
+  String get shortMessage {
+    switch (this) {
+      case WidgetSyncStatus.notApplicable:
+        return 'Виджет доступен только на iOS';
+      case WidgetSyncStatus.synced:
+        return 'Виджет обновлён';
+      case WidgetSyncStatus.notShared:
+        return 'Виджет не получает данные: App Group не активирована';
+      case WidgetSyncStatus.failed:
+        return 'Виджет: ошибка синхронизации';
+    }
+  }
+
+  /// Требует ли статус внимания пользователя.
+  bool get isProblem {
+    return this == WidgetSyncStatus.notShared || this == WidgetSyncStatus.failed;
+  }
+}
+
 /// Хранилище задач: персистентность в приложении + публикация в iOS-виджет.
 ///
 /// Данные живут в двух местах:
@@ -11,14 +49,14 @@ import '../models/todo.dart';
 ///  * App Group-контейнер — общий контейнер с расширением виджета, откуда
 ///    Swift-код виджета читает `todos_json`.
 ///
-/// App Group требует entitlement у обоих таргетов. Если группа недоступна
-/// (например, при подписи бесплатным Apple ID), публикация просто не удаётся:
-/// приложение продолжает работать, а виджет показывает заглушку.
+/// App Group требует entitlement у обоих таргетов. Если группа недоступна,
+/// публикация не удаётся: приложение продолжает работать, а виджет показывает
+/// заглушку. Отличить эти случаи помогает [WidgetSyncStatus].
 class TodoStore {
   TodoStore({this.appGroupId = defaultAppGroupId});
 
   /// Идентификатор App Group. Должен буквально совпадать с тем, что указан в
-  /// `ios/Runner/Runner.entitlements` и `ios/TodoWidget/TodoWidget.entitlements`.
+  /// `ios/Runner/Runner.entitlements` и `ios/TodoWidget/TodoWidget/TodoWidget.entitlements`.
   static const String defaultAppGroupId = 'group.com.example.flutterTestApp';
 
   /// Имя виджета для iOS — параметр `kind` в Swift-конфигурации виджета.
@@ -47,7 +85,9 @@ class TodoStore {
   }
 
   /// Сохраняет задачи локально и публикует их в виджет.
-  Future<void> save(List<Todo> todos) async {
+  ///
+  /// Возвращает статус публикации, чтобы экран мог показать его пользователю.
+  Future<WidgetSyncStatus> save(List<Todo> todos) async {
     final String raw = Todo.listToJson(todos);
 
     try {
@@ -57,13 +97,16 @@ class TodoStore {
       debugPrint('TodoStore.save (локально): $error');
     }
 
-    await publishToWidget(todos, raw);
+    return publishToWidget(todos, raw);
   }
 
   /// Публикует задачи в App Group и просит iOS перерисовать виджет.
-  Future<void> publishToWidget(List<Todo> todos, [String? encoded]) async {
+  Future<WidgetSyncStatus> publishToWidget(
+    List<Todo> todos, [
+    String? encoded,
+  ]) async {
     if (!_widgetSupported) {
-      return;
+      return WidgetSyncStatus.notApplicable;
     }
 
     final String raw = encoded ?? Todo.listToJson(todos);
@@ -78,10 +121,20 @@ class TodoStore {
         DateTime.now().millisecondsSinceEpoch ~/ 1000,
       );
       await HomeWidget.updateWidget(iOSName: iOSWidgetName);
+
+      // Обратное чтение — единственный способ отличить «данные записаны в общий
+      // контейнер» от «запись ушла в никуда из-за отсутствия App Group».
+      final String? readBack = await HomeWidget.getWidgetData<String>(
+        _widgetJsonKey,
+      );
+      return readBack == raw
+          ? WidgetSyncStatus.synced
+          : WidgetSyncStatus.notShared;
     } catch (error) {
       // Ожидаемая ситуация, если App Group недоступна или плагин не загружен
-      // (например, в widget-тестах). Виджет покажет заглушку.
+      // (например, в widget-тестах).
       debugPrint('TodoStore: публикация в виджет не удалась: $error');
+      return WidgetSyncStatus.failed;
     }
   }
 

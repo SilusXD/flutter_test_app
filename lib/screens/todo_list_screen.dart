@@ -30,6 +30,10 @@ class _TodoListScreenState extends State<TodoListScreen> {
   /// Защита от перезаписи сохранённых задач пустым списком до окончания загрузки.
   bool _restored = false;
 
+  /// Статус синхронизации с виджетом. Показывается пользователю, потому что
+  /// иначе причину пустого виджета на устройстве не увидеть.
+  WidgetSyncStatus? _widgetStatus;
+
   int get _completedCount => _todos.where((Todo todo) => todo.isDone).length;
 
   @override
@@ -58,14 +62,26 @@ class _TodoListScreenState extends State<TodoListScreen> {
     });
     // Обновляем виджет сразу после запуска: например, если приложение
     // переустановили, но общий контейнер сохранился.
-    await _store.publishToWidget(_todos);
+    final WidgetSyncStatus status = await _store.publishToWidget(_todos);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _widgetStatus = status);
   }
 
   void _persist() {
     if (!_restored) {
       return;
     }
-    unawaited(_store.save(_todos));
+    unawaited(_saveAndSync());
+  }
+
+  Future<void> _saveAndSync() async {
+    final WidgetSyncStatus status = await _store.save(_todos);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _widgetStatus = status);
   }
 
   /// Идентификатор задачи: время + случайный хвост, чтобы ключи не повторялись
@@ -134,6 +150,9 @@ class _TodoListScreenState extends State<TodoListScreen> {
         children: <Widget>[
           if (_todos.isNotEmpty)
             _SummaryBar(remaining: remaining, total: _todos.length),
+          if (_widgetStatus != null &&
+              _widgetStatus != WidgetSyncStatus.notApplicable)
+            _WidgetStatusBar(status: _widgetStatus!),
           Expanded(
             child: _todos.isEmpty
                 ? const _EmptyState()
@@ -155,6 +174,50 @@ class _TodoListScreenState extends State<TodoListScreen> {
               controller: _controller,
               focusNode: _focusNode,
               onSubmit: _addTodo,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Строка статуса синхронизации с iOS-виджетом.
+///
+/// Нужна для диагностики на самом устройстве: если виджет пуст, здесь видно,
+/// дошли ли данные до общего контейнера.
+class _WidgetStatusBar extends StatelessWidget {
+  const _WidgetStatusBar({required this.status});
+
+  final WidgetSyncStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final bool problem = status.isProblem;
+    final Color background = problem
+        ? theme.colorScheme.errorContainer
+        : theme.colorScheme.secondaryContainer;
+    final Color foreground = problem
+        ? theme.colorScheme.onErrorContainer
+        : theme.colorScheme.onSecondaryContainer;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      color: background,
+      child: Row(
+        children: <Widget>[
+          Icon(
+            problem ? Icons.sync_problem : Icons.widgets_outlined,
+            size: 16,
+            color: foreground,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              status.shortMessage,
+              style: theme.textTheme.labelMedium?.copyWith(color: foreground),
             ),
           ),
         ],

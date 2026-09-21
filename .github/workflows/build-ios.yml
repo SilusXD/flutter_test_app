@@ -252,7 +252,7 @@ jobs:
           ls -lh build/ios/unsigned/
 
       - name: Upload .ipa artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: flutter-test-app-unsigned-ipa
           path: build/ios/unsigned/*.ipa

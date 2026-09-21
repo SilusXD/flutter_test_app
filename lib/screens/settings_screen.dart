@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:home_widget/home_widget.dart';
 
 import '../services/gist_client.dart';
 import '../services/sync_settings.dart';
+import '../services/todo_store.dart';
 
 /// Настройки обмена данными с виджетом через GitHub Gist.
 ///
@@ -139,6 +141,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// Просит iOS перерисовать виджет, не меняя данные.
+  ///
+  /// Полезно, если виджет «застыл»: запрос виден в консоли, а сам виджет
+  /// покажет время последнего обновления.
+  Future<void> _refreshWidget() async {
+    setState(() => _busy = true);
+    try {
+      await HomeWidget.updateWidget(iOSName: TodoStore.iOSWidgetName);
+      _showMessage('Запрошено обновление виджета', isError: false);
+    } catch (error) {
+      _showMessage('Не удалось запросить обновление: $error', isError: true);
+    }
+    if (mounted) {
+      setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
@@ -221,6 +240,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onPressed: _busy ? null : _check,
             icon: const Icon(Icons.wifi_tethering),
             label: const Text('Проверить связь'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: _busy ? null : _refreshWidget,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Обновить виджет'),
           ),
           const SizedBox(height: 24),
           Text(

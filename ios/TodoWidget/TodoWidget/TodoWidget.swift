@@ -32,6 +32,10 @@ struct TodoEntry: TimelineEntry {
 
     let state: TodoEntryState
 
+    /// Данные взяты из кеша, потому что сеть не ответила. Показывается
+    /// пользователю: иначе виджет выглядит «замороженным» без объяснения.
+    let isFromCache: Bool
+
     var total: Int { items.count }
 
     static let placeholder = TodoEntry(
@@ -42,11 +46,18 @@ struct TodoEntry: TimelineEntry {
             TodoItem(id: "3", title: "Сдать отчёт", done: false),
         ],
         pending: 2,
-        state: .ok
+        state: .ok,
+        isFromCache: false
     )
 
     static func message(_ state: TodoEntryState) -> TodoEntry {
-        TodoEntry(date: Date(), items: [], pending: 0, state: state)
+        TodoEntry(
+            date: Date(),
+            items: [],
+            pending: 0,
+            state: state,
+            isFromCache: false
+        )
     }
 }
 
@@ -70,6 +81,7 @@ enum TodoRemoteSource {
     static let gistRawURL = "__TODO_GIST_URL__"
 
     private static let cacheKey = "cached_todos_json"
+    private static let cacheDateKey = "cached_todos_date"
 
     /// Задан ли реальный адрес (а не placeholder из шаблона).
     static var isConfigured: Bool {
@@ -80,31 +92,49 @@ enum TodoRemoteSource {
 
     /// Загружает задачи; при неудаче отдаёт последние удачные из кеша.
     static func load(completion: @escaping (TodoEntry) -> Void) {
-        guard isConfigured, let url = URL(string: gistRawURL) else {
+        guard isConfigured, let baseURL = URL(string: gistRawURL) else {
             completion(.message(.notConfigured))
             return
         }
 
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: bustCache(baseURL))
         request.timeoutInterval = 15
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
         URLSession.shared.dataTask(with: request) { data, _, _ in
             if let data, let entry = decode(data) {
                 UserDefaults.standard.set(data, forKey: cacheKey)
+                UserDefaults.standard.set(Date(), forKey: cacheDateKey)
                 completion(entry)
                 return
             }
 
-            // Сети нет — показываем последнее, что удалось загрузить.
+            // Сети нет — показываем последнее, что удалось загрузить,
+            // и помечаем данные как кеш.
             if let cached = UserDefaults.standard.data(forKey: cacheKey),
                let entry = decode(cached) {
-                completion(entry)
+                let cachedAt = UserDefaults.standard.object(forKey: cacheDateKey) as? Date
+                completion(entry.asCached(at: cachedAt))
                 return
             }
 
             completion(.message(.failed))
         }.resume()
+    }
+
+    /// Добавляет к адресу метку времени.
+    ///
+    /// raw-ссылка gist отдаётся через CDN, и без параметра он может вернуть
+    /// закешированную ревизию файла — тогда виджет «не обновляется» даже после
+    /// пересоздания. Уникальный query заставляет запросить свежую версию.
+    private static func bustCache(_ url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        components.queryItems = [
+            URLQueryItem(name: "v", value: String(Int(Date().timeIntervalSince1970)))
+        ]
+        return components.url ?? url
     }
 
     private static func decode(_ data: Data) -> TodoEntry? {
@@ -118,7 +148,21 @@ enum TodoRemoteSource {
             date: Date(),
             items: items,
             pending: items.filter { !$0.done }.count,
-            state: items.isEmpty ? .empty : .ok
+            state: items.isEmpty ? .empty : .ok,
+            isFromCache: false
+        )
+    }
+}
+
+private extension TodoEntry {
+    /// Помечает запись как полученную из кеша и переносит время кеширования.
+    func asCached(at cachedAt: Date?) -> TodoEntry {
+        TodoEntry(
+            date: cachedAt ?? date,
+            items: items,
+            pending: pending,
+            state: state,
+            isFromCache: true
         )
     }
 }
@@ -170,6 +214,16 @@ struct TodoWidgetEntryView: View {
         max(0, entry.items.count - visibleItems.count)
     }
 
+    /// Показывает, когда данные были получены: сразу видно, обновился виджет
+    /// или показывает кеш.
+    private var freshnessLabel: String? {
+        guard entry.state == .ok else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        let time = formatter.string(from: entry.date)
+        return entry.isFromCache ? "кеш от \(time)" : "обновлено \(time)"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
@@ -181,10 +235,18 @@ struct TodoWidgetEntryView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if hiddenCount > 0 {
-                    Text("и ещё \(hiddenCount)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    if hiddenCount > 0 {
+                        Text("и ещё \(hiddenCount)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if let freshnessLabel {
+                        Text(freshnessLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             } else {
                 Spacer(minLength: 0)

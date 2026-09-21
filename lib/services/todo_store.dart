@@ -109,6 +109,7 @@ class TodoStore {
         gistId: gistId,
         token: settings.token,
         content: raw,
+        fileName: settings.fileName,
       );
       // reloadTimelines не требует App Group — виджет сам сходит в сеть.
       await HomeWidget.updateWidget(iOSName: iOSWidgetName);

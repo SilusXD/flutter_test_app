@@ -80,7 +80,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted) {
       return;
     }
-    setState(() => _busy = false);
+    // Показываем нормализованный адрес: из ссылки «Raw» убирается хеш ревизии,
+    // иначе виджет читал бы ту версию файла, что была на момент копирования.
+    setState(() {
+      _busy = false;
+      _urlController.text = settings.normalizedGistUrl;
+    });
     Navigator.of(context).pop(true);
   }
 
@@ -94,15 +99,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     setState(() => _busy = true);
+
+    String? body;
     try {
-      final String? body = await _gist.download(gistUrl: settings.gistUrl);
-      final String preview = (body ?? '').trim();
-      _showMessage(
-        preview.isEmpty
-            ? 'Файл прочитан, но он пуст — задачи ещё не отправлялись'
-            : 'Файл прочитан: ${preview.length} символов',
-        isError: false,
-      );
+      body = await _gist.download(gistUrl: settings.normalizedGistUrl);
     } on GistSyncException catch (error) {
       _showMessage('Чтение: ${error.message}', isError: true);
       if (mounted) {
@@ -111,13 +111,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
+    final String current = (body ?? '').trim();
+    final String preview = current.length > 120
+        ? '${current.substring(0, 120)}…'
+        : current;
+
     try {
+      // Пишем обратно то же самое содержимое: так проверяется запись, но уже
+      // отправленные задачи не затираются.
       await _gist.upload(
         gistId: gistId,
         token: settings.token,
-        content: '[]',
+        content: current.isEmpty ? '[]' : current,
+        fileName: settings.fileName,
       );
-      _showMessage('Проверка успешна: запись в гист работает', isError: false);
+      _showMessage(
+        'Связь есть. Файл «${settings.fileName}»: '
+        '${preview.isEmpty ? 'пусто' : preview}',
+        isError: false,
+      );
     } on GistSyncException catch (error) {
       _showMessage('Запись: ${error.message}', isError: true);
     }
@@ -218,8 +230,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 4),
           Text(
             '1. Создайте на github.com секретный gist с файлом '
-            '«${SyncSettings.gistFileName}» и содержимым «[]».\n'
-            '2. Скопируйте ссылку Raw для этого файла и вставьте её выше.\n'
+            '«${SyncSettings.defaultFileName}» и содержимым «[]».\n'
+            '2. Скопируйте ссылку Raw и вставьте её выше. Хеш ревизии из ссылки '
+            'убирается автоматически: адрес должен заканчиваться на /raw/'
+            '${SyncSettings.defaultFileName}, иначе виджет будет читать старую '
+            'версию файла.\n'
             '3. Создайте токен: Settings → Developer settings → '
             'Personal access tokens (classic) → scope «gist».\n'
             '4. Добавьте тот же raw-URL в GitHub Secrets репозитория как '

@@ -12,7 +12,10 @@ class GistClient {
 
   final HttpClient _client;
 
-  /// Отправляет содержимое в файл [SyncSettings.gistFileName] гиста.
+  /// Отправляет содержимое в файл [fileName] гиста.
+  ///
+  /// Имя файла берётся из URL настроек, чтобы запись шла ровно в тот файл,
+  /// который читает виджет.
   ///
   /// Бросает [GistSyncException] при любой неудаче, чтобы вызывающий код мог
   /// показать пользователю внятную причину.
@@ -20,6 +23,7 @@ class GistClient {
     required String gistId,
     required String token,
     required String content,
+    String fileName = SyncSettings.defaultFileName,
   }) async {
     final Uri uri = Uri.https('api.github.com', '/gists/$gistId');
 
@@ -32,7 +36,7 @@ class GistClient {
       request.write(
         jsonEncode(<String, dynamic>{
           'files': <String, dynamic>{
-            SyncSettings.gistFileName: <String, String>{'content': content},
+            fileName: <String, String>{'content': content},
           },
         }),
       );
@@ -64,7 +68,10 @@ class GistClient {
       final HttpClientResponse response = await request.close();
       final String body = await response.transform(utf8.decoder).join();
       if (response.statusCode != HttpStatus.ok) {
-        throw GistSyncException('Чтение вернуло HTTP ${response.statusCode}');
+        throw GistSyncException(
+          'Чтение вернуло HTTP ${response.statusCode}. Проверьте, что URL указывает '
+          'на файл в гисте и что файл существует',
+        );
       }
       return body;
     } on GistSyncException {

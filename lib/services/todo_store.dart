@@ -62,6 +62,15 @@ class TodoStore {
   /// можно было понять без логов.
   String? lastError;
 
+  /// Снимок, ожидающий отправки, и текущая отправка.
+  ///
+  /// Отправки идут строго по одной, а промежуточные снимки пропускаются. Без
+  /// этого при быстром добавлении задач несколько PATCH-запросов уходили
+  /// параллельно, и в Gist мог остаться снимок с одной задачей — тот, чей ответ
+  /// пришёл последним.
+  String? _pendingRaw;
+  Future<WidgetSyncStatus>? _inFlight;
+
   /// Читает задачи из локального хранилища.
   Future<List<Todo>> load() async {
     try {
@@ -77,7 +86,7 @@ class TodoStore {
     }
   }
 
-  /// Сохраняет задачи локально и отправляет их в виджет.
+  /// Сохраняет задачи локально и ставит их в очередь на отправку в виджет.
   Future<WidgetSyncStatus> save(List<Todo> todos) async {
     final String raw = Todo.listToJson(todos);
 
@@ -91,8 +100,30 @@ class TodoStore {
     return sync(raw);
   }
 
-  /// Отправляет готовый JSON в Gist и просит iOS перерисовать виджет.
-  Future<WidgetSyncStatus> sync(String raw) async {
+  /// Ставит снимок в очередь на отправку.
+  ///
+  /// Возвращает результат последней отправки в очереди. Если отправка уже идёт,
+  /// новый снимок заменит ожидающий — в Gist уйдёт самое свежее состояние.
+  Future<WidgetSyncStatus> sync(String raw) {
+    _pendingRaw = raw;
+    return _inFlight ??= _drainQueue();
+  }
+
+  Future<WidgetSyncStatus> _drainQueue() async {
+    WidgetSyncStatus status = WidgetSyncStatus.notApplicable;
+    try {
+      while (_pendingRaw != null) {
+        final String raw = _pendingRaw!;
+        _pendingRaw = null;
+        status = await _upload(raw);
+      }
+      return status;
+    } finally {
+      _inFlight = null;
+    }
+  }
+
+  Future<WidgetSyncStatus> _upload(String raw) async {
     if (!_widgetSupported) {
       return WidgetSyncStatus.notApplicable;
     }

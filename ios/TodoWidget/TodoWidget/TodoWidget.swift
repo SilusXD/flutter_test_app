@@ -38,15 +38,15 @@ struct TodoEntry: TimelineEntry {
 
     var total: Int { items.count }
 
+    /// Показывается в галерее виджетов и до загрузки реальных данных.
+    ///
+    /// Специально без демонстрационных задач: раньше здесь был набор из трёх
+    /// примеров, и его можно было принять за реальные задачи из приложения.
     static let placeholder = TodoEntry(
         date: Date(),
-        items: [
-            TodoItem(id: "1", title: "Купить молоко", done: false),
-            TodoItem(id: "2", title: "Позвонить маме", done: true),
-            TodoItem(id: "3", title: "Сдать отчёт", done: false),
-        ],
-        pending: 2,
-        state: .ok,
+        items: [],
+        pending: 0,
+        state: .empty,
         isFromCache: false
     )
 

@@ -105,15 +105,16 @@ open ios/Runner.xcworkspace                 # либо сборка и запу�
 - **Bundle Identifier** — `com.example.flutterTestApp`
   (`ios/Runner.xcodeproj/project.pbxproj`). Менять не обязательно, если приложение
   ставится через SideStore; для App Store понадобится свой App ID.
-- **Минимальная версия iOS** — 13.0 (`IPHONEOS_DEPLOYMENT_TARGET`).
+- **Минимальная версия iOS** — 16.0 (`IPHONEOS_DEPLOYMENT_TARGET`). Ниже нельзя:
+  плагин `home_widget` требует минимум 14.0, а сборка идёт современным Xcode.
 - **CocoaPods используется**: в проекте есть плагины (`shared_preferences`, `home_widget`),
   поэтому Flutter генерирует `Podfile` (`flutter build ios --config-only`), после чего
   выполняется `pod install`. В git `Podfile` не хранится.
 - **Виджет** собирается отдельным проектом `ios/TodoWidget/TodoWidget.xcodeproj` и
   встраивается в `Runner.app/PlugIns/` на этапе CI — Flutter-проект при этом не
   модифицируется вообще.
-- **Минимальная версия iOS для виджета** — 17.0 (WidgetKit и используемые API);
-  само приложение по-прежнему собирается с `IPHONEOS_DEPLOYMENT_TARGET = 13.0`.
+- **Минимальная версия iOS для виджета** — 16.0, как и у приложения (фон виджета
+  задаётся через `containerBackground` только на iOS 17+, на 16 и ниже его рисует система).
 - Подпись для установки делает ваш установщик (iloader / SideStore). CI подписывает
   бандл ad-hoc только для того, чтобы в подписи сохранились entitlements (App Group).
 

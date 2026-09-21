@@ -148,7 +148,7 @@ struct TodoWidgetEntryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .widgetContainerBackground()
     }
 
     private var header: some View {
@@ -183,6 +183,19 @@ struct TodoWidgetEntryView: View {
 }
 
 // MARK: - Конфигурация виджета
+
+/// Фон виджета: на iOS 17+ его обязан задавать сам виджет (containerBackground),
+/// а на iOS 16 и ниже фон рисует система и такого API там просто нет.
+private extension View {
+    @ViewBuilder
+    func widgetContainerBackground() -> some View {
+        if #available(iOS 17.0, *) {
+            containerBackground(.fill.tertiary, for: .widget)
+        } else {
+            self
+        }
+    }
+}
 
 struct TodoWidget: Widget {
     /// Значение `kind` обязано совпадать с `iOSWidgetName` в Dart-коде

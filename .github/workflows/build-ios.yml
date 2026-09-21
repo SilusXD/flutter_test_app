@@ -95,25 +95,91 @@ jobs:
           fi
           pod --version
 
-      # ВАЖНО: в pubspec.yaml нет плагинов с нативным кодом, поэтому Flutter не создаёт
-      # Podfile и не запускает CocoaPods. Шаг честно пропускает pod install вместо
-      # падения с "No Podfile found in the project directory".
-      - name: CocoaPods install (only if Podfile exists)
+      # В проекте есть плагины (shared_preferences, home_widget), поэтому Flutter
+      # использует CocoaPods. Podfile генерируется инструментами Flutter и в git не
+      # хранится — создаём его заранее, иначе pod install упадёт с
+      # "No Podfile found in the project directory".
+      - name: Generate Podfile (config only)
+        run: flutter build ios --config-only
+
+      - name: CocoaPods install
         run: |
           cd ios
           if [ -f Podfile ]; then
-            echo "Podfile найден — устанавливаю зависимости CocoaPods."
             pod install
           else
-            echo "ios/Podfile отсутствует: в проекте нет плагинов с нативным кодом."
-            echo "CocoaPods не используется. Как только появится первый плагин"
-            echo "(например, shared_preferences), Flutter создаст Podfile сам,"
-            echo "и этот шаг начнёт выполняться автоматически."
+            echo "Podfile не найден — пропускаю pod install (зависимости через Swift Package Manager)."
           fi
 
-      # --no-codesign — сборка без подписи: .ipa подпишет SideStore вашим Apple ID на устройстве.
+      # --no-codesign — сборка без подписи: .ipa подпишет SideStore/iloader при установке.
       - name: Build iOS (release, no codesign)
         run: flutter build ios --release --no-codesign
+
+      # --- Виджет на главный экран ------------------------------------------------
+      # Виджет собирается ОТДЕЛЬНЫМ Xcode-проектом (ios/TodoWidget), поэтому
+      # Flutter-проект (ios/Runner.xcodeproj) остаётся неизменным.
+      - name: Build widget extension
+        run: |
+          set -euo pipefail
+
+          xcodebuild \
+            -project ios/TodoWidget/TodoWidget.xcodeproj \
+            -target TodoWidget \
+            -configuration Release \
+            -sdk iphoneos \
+            CONFIGURATION_BUILD_DIR="$PWD/build/widget" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+          echo "--- собранное расширение ---"
+          ls -la build/widget
+
+      - name: Embed widget into the app
+        run: |
+          set -euo pipefail
+
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          WIDGET_PATH="build/widget/TodoWidget.appex"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Ошибка: не найден $APP_PATH" >&2
+            exit 1
+          fi
+          if [ ! -d "$WIDGET_PATH" ]; then
+            echo "Ошибка: расширение виджета не собралось ($WIDGET_PATH)" >&2
+            exit 1
+          fi
+
+          mkdir -p "$APP_PATH/PlugIns"
+          rm -rf "$APP_PATH/PlugIns/TodoWidget.appex"
+          cp -R "$WIDGET_PATH" "$APP_PATH/PlugIns/"
+
+          # Ad-hoc подпись с entitlements. App Group нужна, чтобы приложение и
+          # виджет делили один контейнер с задачами. Установщик (iloader/SideStore)
+          # переподпишет бандл своим сертификатом, но entitlements берёт из подписи —
+          # поэтому подписываем сами, а не оставляем совсем без подписи.
+          echo "--- подпись вложенных фреймворков ---"
+          for framework in "$APP_PATH/Frameworks/"*.framework; do
+            [ -e "$framework" ] || continue
+            codesign --force --sign - "$framework"
+          done
+
+          echo "--- подпись расширения виджета ---"
+          codesign --force --sign - \
+            --entitlements ios/TodoWidget/TodoWidget/TodoWidget.entitlements \
+            "$APP_PATH/PlugIns/TodoWidget.appex"
+
+          echo "--- подпись приложения ---"
+          codesign --force --sign - \
+            --entitlements ios/Runner/Runner.entitlements \
+            "$APP_PATH"
+
+          echo "--- entitlements приложения ---"
+          codesign -d --entitlements - "$APP_PATH" 2>&1 | head -20 || true
+          echo "--- entitlements виджета ---"
+          codesign -d --entitlements - "$APP_PATH/PlugIns/TodoWidget.appex" 2>&1 | head -20 || true
 
       - name: Determine app version
         id: app_version
@@ -160,6 +226,16 @@ jobs:
           unzip -l "$IPA" | grep -q 'Payload/Runner.app/Info.plist' \
             && echo "OK: Info.plist на месте" \
             || { echo "Ошибка: Info.plist не найден в архиве" >&2; exit 1; }
+          unzip -l "$IPA" | grep -q 'Payload/Runner.app/PlugIns/TodoWidget.appex/TodoWidget' \
+            && echo "OK: расширение виджета на месте" \
+            || { echo "Ошибка: расширение виджета отсутствует в .ipa" >&2; exit 1; }
+          unzip -l "$IPA" | grep -q 'Payload/Runner.app/PlugIns/TodoWidget.appex/Info.plist' \
+            && echo "OK: Info.plist виджета на месте" \
+            || { echo "Ошибка: Info.plist виджета отсутствует в .ipa" >&2; exit 1; }
+          # По подписи установщик определяет entitlements (App Group для виджета).
+          unzip -l "$IPA" | grep -q 'Payload/Runner.app/_CodeSignature/CodeResources' \
+            && echo "OK: подпись (ad-hoc) присутствует — entitlements перенесутся" \
+            || echo "ВНИМАНИЕ: подписи в архиве нет, App Group может не активироваться."
 
       - name: Rename .ipa with version
         run: |
@@ -190,20 +266,29 @@ jobs:
           IPA_FILE=$(ls build/ios/unsigned/*.ipa | head -1)
 
           NOTES=$(cat <<EOF
-          Неподписанный (unsigned) .ipa сборки Flutter-приложения.
+          Неподписанный (unsigned) .ipa сборки Flutter-приложения с виджетом
+          «Список дел» для главного экрана.
 
           - Версия приложения: ${APP_VERSION}
           - Flutter: ${FLUTTER_VERSION}
           - Коммит: ${GITHUB_SHA}
-          - Подпись не выполняется: её делает SideStore на устройстве.
+          - Виджет: расширение TodoWidget внутри Payload/Runner.app/PlugIns
+          - Подпись: ad-hoc с App Group entitlement; при установке её заменит
+            ваш установщик (iloader / SideStore).
 
-          Как установить на iPhone (iOS 15+):
-          1. Откройте эту страницу в Safari на iPhone и скачайте \`.ipa\` — файл попадёт в приложение «Файлы».
-          2. Включите LocalDevVPN и Wi-Fi.
-          3. SideStore → My Apps → «+» → выберите скачанный .ipa.
-          4. Первый запуск: Настройки → Основные → VPN и управление устройством → доверьте сертификату Apple ID.
+          Как установить на iPhone:
+          1. Скачайте \`.ipa\` на iPhone (Safari → «Загрузить»; файл попадёт в «Файлы»).
+          2. Лучше ставить через iloader по кабелю: он подписывает вложенные
+             расширения и переносит App Group entitlement. SideStore может
+             ответить ошибкой 3014 «The provided app group is invalid».
+          3. Добавьте виджет: длинное нажатие на рабочем столе → «+» →
+             «Список дел» → выберите размер.
+          4. Добавьте задачи в приложении — виджет обновится сам.
 
-          Бесплатный Apple ID: 3 приложения всего (включая сам SideStore), 7 дней до переподписи.
+          Бесплатный Apple ID: 3 приложения (включая SideStore), 7 дней до переподписи.
+          Важно: App Group официально требует платный Apple Developer (\$99/год).
+          Если группа не активируется, виджет покажет «Задач пока нет».
+          Подробности: docs/IOS_SIDESTORE_GUIDE.md
           EOF
           )
 

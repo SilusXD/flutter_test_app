@@ -1,31 +1,77 @@
+import 'dart:async';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../models/todo.dart';
+import '../services/todo_store.dart';
 import '../widgets/todo_tile.dart';
 
 /// Экран списка дел: добавление, отметка выполнения и удаление задач.
 ///
-/// Данные хранятся в памяти — при перезапуске приложения список пуст.
+/// Задачи сохраняются между запусками приложения и публикуются в общий
+/// контейнер, откуда их читает виджет на главном экране iOS.
 class TodoListScreen extends StatefulWidget {
-  const TodoListScreen({super.key});
+  const TodoListScreen({super.key, this.store});
+
+  /// Хранилище вынесено в параметр, чтобы подменять его в тестах.
+  final TodoStore? store;
 
   @override
   State<TodoListScreen> createState() => _TodoListScreenState();
 }
 
 class _TodoListScreenState extends State<TodoListScreen> {
+  late final TodoStore _store = widget.store ?? TodoStore();
   final List<Todo> _todos = <Todo>[];
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
-  int _nextId = 0;
+
+  /// Защита от перезаписи сохранённых задач пустым списком до окончания загрузки.
+  bool _restored = false;
 
   int get _completedCount => _todos.where((Todo todo) => todo.isDone).length;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_restore());
+  }
 
   @override
   void dispose() {
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  Future<void> _restore() async {
+    final List<Todo> saved = await _store.load();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _todos
+        ..clear()
+        ..addAll(saved);
+      _restored = true;
+    });
+    // Обновляем виджет сразу после запуска: например, если приложение
+    // переустановили, но общий контейнер сохранился.
+    await _store.publishToWidget(_todos);
+  }
+
+  void _persist() {
+    if (!_restored) {
+      return;
+    }
+    unawaited(_store.save(_todos));
+  }
+
+  /// Идентификатор задачи: время + случайный хвост, чтобы ключи не повторялись
+  /// после перезапуска приложения.
+  String _newId() {
+    return '${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(10000)}';
   }
 
   void _addTodo() {
@@ -35,11 +81,12 @@ class _TodoListScreenState extends State<TodoListScreen> {
     }
 
     setState(() {
-      _todos.insert(0, Todo(id: '${_nextId++}', title: title));
+      _todos.insert(0, Todo(id: _newId(), title: title));
     });
     _controller.clear();
     // Фокус остаётся в поле, чтобы удобно вводить задачи одну за другой.
     _focusNode.requestFocus();
+    _persist();
   }
 
   void _toggleTodo(Todo todo) {
@@ -50,18 +97,21 @@ class _TodoListScreenState extends State<TodoListScreen> {
       }
       _todos[index] = _todos[index].copyWith(isDone: !_todos[index].isDone);
     });
+    _persist();
   }
 
   void _removeTodo(Todo todo) {
     setState(() {
       _todos.removeWhere((Todo item) => item.id == todo.id);
     });
+    _persist();
   }
 
   void _clearCompleted() {
     setState(() {
       _todos.removeWhere((Todo todo) => todo.isDone);
     });
+    _persist();
   }
 
   @override

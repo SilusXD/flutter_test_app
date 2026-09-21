@@ -1,10 +1,10 @@
 # flutter_test_app
 
-Простой список дел (to-do list) на Flutter + настроенный CI, который собирает
-**неподписанный `.ipa`** под iOS и публикует его в GitHub Releases.
+Простой список дел (to-do list) на Flutter: приложение + **виджет на главный экран iOS**
++ CI, который собирает **неподписанный `.ipa`** и публикует его в GitHub Releases.
 
 Личный Mac не нужен: сборка идёт на macOS-раннере GitHub Actions, а подпись выполняет
-SideStore прямо на iPhone.
+установщик (iloader / SideStore) прямо на iPhone.
 
 ## Возможности
 
@@ -13,24 +13,48 @@ SideStore прямо на iPhone.
 - удаление задачи свайпом влево;
 - счётчик «Осталось: N из M»;
 - кнопка в AppBar для удаления всех выполненных задач;
-- заглушка «Пока пусто», когда список пуст.
+- задачи сохраняются между запусками приложения;
+- **виджет iOS** с кратким списком задач (маленький, средний и большой размеры).
 
 ## Структура
 
 ```
-.github/workflows/build-ios.yml   # CI: сборка unsigned .ipa + публикация в Releases
-docs/IOS_SIDESTORE_GUIDE.md       # пошаговая установка .ipa на iPhone через SideStore
+.github/workflows/build-ios.yml      # CI: сборка .ipa (приложение + виджет) и Release
+docs/IOS_SIDESTORE_GUIDE.md          # установка на iPhone, виджет, ограничения App Groups
 lib/
-├── main.dart                     # точка входа и тема приложения
-├── models/todo.dart              # модель задачи
-├── screens/todo_list_screen.dart # экран списка, счётчик, поле ввода
-└── widgets/todo_tile.dart        # строка списка (чекбокс + свайп-удаление)
-test/widget_test.dart             # widget-тесты основных сценариев
-ios/                              # iOS-проект Xcode (используется в CI)
+├── main.dart                        # точка входа и тема приложения
+├── models/todo.dart                 # модель задачи + JSON для виджета
+├── services/todo_store.dart         # хранилище: SharedPreferences + App Group
+├── screens/todo_list_screen.dart    # экран списка, счётчик, поле ввода
+└── widgets/todo_tile.dart           # строка списка (чекбокс + свайп-удаление)
+test/widget_test.dart                # widget-тесты основных сценариев
+tools/validate_pbxproj.py            # проверка Xcode-проектов без macOS
+ios/
+├── Runner/                          # приложение (Flutter)
+│   └── Runner.entitlements          # App Group для приложения
+└── TodoWidget/                      # виджет: отдельный Xcode-проект
+    ├── TodoWidget.xcodeproj
+    └── TodoWidget/                  # Swift-код виджета, Info.plist, entitlements
 ```
 
-Данные хранятся в памяти виджета (`setState`) — после перезапуска приложения
-список пуст. Внешних пакетов нет: только Flutter SDK.
+Задачи хранятся локально (`shared_preferences`), а для виджета дублируются в общий
+App Group-контейнер (`home_widget`) — оттуда их читает Swift-код виджета.
+
+## Виджет iOS
+
+Виджет — это расширение `TodoWidget` (SwiftUI + WidgetKit). Dart-код в нём не
+исполняется: приложение только пишет задачи в общий контейнер и просит систему
+перерисовать виджет (`WidgetCenter.reloadTimelines`). Идентификатор App Group
+`group.com.example.flutterTestApp` должен совпадать в трёх местах:
+`lib/services/todo_store.dart`, `ios/Runner/Runner.entitlements`,
+`ios/TodoWidget/TodoWidget/TodoWidget.entitlements`.
+
+Важное ограничение: **App Groups Apple выдаёт только платным аккаунтам Apple
+Developer**. С бесплатным Apple ID общий контейнер, скорее всего, не появится, и виджет
+покажет заглушку «Задач пока нет» (приложение при этом работает нормально). Подпись
+бандла с entitlements делается в CI именно для того, чтобы установщик мог перенести
+группу при sideloading. Подробности — в
+[`docs/IOS_SIDESTORE_GUIDE.md`](docs/IOS_SIDESTORE_GUIDE.md).
 
 ## Запуск
 
@@ -56,8 +80,9 @@ flutter test         # widget-тесты
 `flutter build ios --release --no-codesign` → упаковка `Runner.app` в `Payload/*.ipa` →
 проверка структуры архива → upload artifact → создание GitHub Release.
 
-Секреты для этого проекта **не нужны**: все зависимости публичные, подпись не выполняется.
-`GITHUB_TOKEN` используется автоматически для создания Release (`permissions: contents: write`).
+Секреты для этого проекта **не нужны**: все зависимости публичные, Apple-аккаунт для
+сборки не требуется. `GITHUB_TOKEN` используется автоматически для создания Release
+(`permissions: contents: write`).
 Если появятся приватные зависимости, понадобятся `PRIVATE_REPO_TOKEN` (HTTPS) или
 `PRIVATE_REPO_SSH_KEY` (SSH) — добавляются в Settings → Secrets and variables → Actions.
 
@@ -81,11 +106,16 @@ open ios/Runner.xcworkspace                 # либо сборка и запу�
   (`ios/Runner.xcodeproj/project.pbxproj`). Менять не обязательно, если приложение
   ставится через SideStore; для App Store понадобится свой App ID.
 - **Минимальная версия iOS** — 13.0 (`IPHONEOS_DEPLOYMENT_TARGET`).
-- **CocoaPods сейчас не используется**: в проекте нет плагинов с нативным кодом, поэтому
-  `ios/Podfile` не создаётся и `pod install` запускать не нужно. Как только появится первый
-  плагин (например, `shared_preferences`), Flutter создаст `Podfile` сам, и шаг в CI
-  начнёт работать автоматически.
-- Подпись для установки на устройство в этой схеме не нужна: её делает SideStore.
+- **CocoaPods используется**: в проекте есть плагины (`shared_preferences`, `home_widget`),
+  поэтому Flutter генерирует `Podfile` (`flutter build ios --config-only`), после чего
+  выполняется `pod install`. В git `Podfile` не хранится.
+- **Виджет** собирается отдельным проектом `ios/TodoWidget/TodoWidget.xcodeproj` и
+  встраивается в `Runner.app/PlugIns/` на этапе CI — Flutter-проект при этом не
+  модифицируется вообще.
+- **Минимальная версия iOS для виджета** — 17.0 (WidgetKit и используемые API);
+  само приложение по-прежнему собирается с `IPHONEOS_DEPLOYMENT_TARGET = 13.0`.
+- Подпись для установки делает ваш установщик (iloader / SideStore). CI подписывает
+  бандл ad-hoc только для того, чтобы в подписи сохранились entitlements (App Group).
 
 ## Установка на iPhone через SideStore
 
@@ -101,6 +131,6 @@ SideStore → My Apps → «+».
 
 ## Что можно добавить дальше
 
-- сохранение задач между запусками (например, `shared_preferences`);
 - фильтры «Все / Активные / Выполненные»;
-- редактирование текста задачи и дедлайны.
+- редактирование текста задачи и дедлайны;
+- интерактивный виджет: отмечать задачи прямо с главного экрана (iOS 17+).

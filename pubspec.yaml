@@ -9,6 +9,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Локальное сохранение задач между запусками приложения.
+  shared_preferences: ^2.5.5
+  # Публикация задач в общий App Group-контейнер и обновление iOS-виджета.
+  home_widget: ^0.10.0
 
 dev_dependencies:
   flutter_test:

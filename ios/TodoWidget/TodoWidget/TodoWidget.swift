@@ -10,6 +10,18 @@ struct TodoItem: Identifiable {
     let done: Bool
 }
 
+/// Что удалось получить на этом обновлении.
+enum TodoEntryState {
+    /// Данные загружены, задачи есть.
+    case ok
+    /// Данные загружены, список пуст.
+    case empty
+    /// Адрес данных не задан при сборке.
+    case notConfigured
+    /// Сеть или разбор не удались, кеша тоже нет.
+    case failed
+}
+
 /// Данные, которые виджет показывает в конкретный момент времени.
 struct TodoEntry: TimelineEntry {
     let date: Date
@@ -18,9 +30,7 @@ struct TodoEntry: TimelineEntry {
     /// Сколько задач ещё не выполнено.
     let pending: Int
 
-    /// Доступен ли общий контейнер App Group. Нужно, чтобы отличать «задач нет»
-    /// от «приложение не может делиться данными» — это разные диагнозы.
-    let sharedStorageAvailable: Bool
+    let state: TodoEntryState
 
     var total: Int { items.count }
 
@@ -32,87 +42,84 @@ struct TodoEntry: TimelineEntry {
             TodoItem(id: "3", title: "Сдать отчёт", done: false),
         ],
         pending: 2,
-        sharedStorageAvailable: true
+        state: .ok
     )
 
-    /// Контейнер доступен, но задач нет.
-    static let empty = TodoEntry(
-        date: Date(),
-        items: [],
-        pending: 0,
-        sharedStorageAvailable: true
-    )
-
-    /// Общий контейнер недоступен: App Group не активирована.
-    static let unavailable = TodoEntry(
-        date: Date(),
-        items: [],
-        pending: 0,
-        sharedStorageAvailable: false
-    )
+    static func message(_ state: TodoEntryState) -> TodoEntry {
+        TodoEntry(date: Date(), items: [], pending: 0, state: state)
+    }
 }
 
-/// Структура JSON, которую пишет Flutter (ключ `todos_json`).
+/// Структура JSON, которую пишет Flutter.
 private struct TodoPayload: Decodable {
     let id: String
     let title: String
     let done: Bool
 }
 
-// MARK: - Чтение общего хранилища (App Group)
+// MARK: - Источник данных
 
-/// Читает задачи из общего контейнера App Group.
+/// Читает задачи по HTTPS из приватного Gist.
 ///
-/// Тот же идентификатор группы должен быть указан в entitlements приложения
-/// (`ios/Runner/Runner.entitlements`) и расширения
-/// (`ios/TodoWidget/TodoWidget/TodoWidget.entitlements`), а также в Dart-коде
-/// (`TodoStore.defaultAppGroupId`).
-enum TodoSharedStorage {
-    static let appGroupId = "group.com.example.flutterTestApp"
-    static let jsonKey = "todos_json"
-    static let pendingKey = "todos_pending"
+/// Обмен через App Group на бесплатном Apple ID невозможен (iOS не создаёт общий
+/// контейнер без платного профиля), поэтому единственный общий канал —
+/// сеть: приложение пишет JSON в Gist, виджет его скачивает. Адрес подставляется
+/// на этапе сборки из GitHub Secret `TODO_GIST_URL`.
+enum TodoRemoteSource {
+    /// Значение по умолчанию заменяется в workflow перед сборкой виджета.
+    static let gistRawURL = "__TODO_GIST_URL__"
 
-    /// Выдала ли система URL общего контейнера.
-    ///
-    /// Если entitlement `com.apple.security.application-groups` не применён при
-    /// подписи, контейнера нет — и это надёжный признак, что приложение и виджет
-    /// физически не могут обмениваться данными.
-    static var isContainerAvailable: Bool {
-        FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupId
-        ) != nil
+    private static let cacheKey = "cached_todos_json"
+
+    /// Задан ли реальный адрес (а не placeholder из шаблона).
+    static var isConfigured: Bool {
+        !gistRawURL.isEmpty
+            && !gistRawURL.hasPrefix("__")
+            && URL(string: gistRawURL) != nil
     }
 
-    static func load() -> TodoEntry {
-        guard isContainerAvailable else {
-            return .unavailable
+    /// Загружает задачи; при неудаче отдаёт последние удачные из кеша.
+    static func load(completion: @escaping (TodoEntry) -> Void) {
+        guard isConfigured, let url = URL(string: gistRawURL) else {
+            completion(.message(.notConfigured))
+            return
         }
 
-        guard
-            let defaults = UserDefaults(suiteName: appGroupId),
-            let raw = defaults.string(forKey: jsonKey),
-            let data = raw.data(using: .utf8)
-        else {
-            // Контейнер есть, но приложение ещё ничего не записало.
-            return .empty
-        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        do {
-            let payload = try JSONDecoder().decode([TodoPayload].self, from: data)
-            let items = payload.map {
-                TodoItem(id: $0.id, title: $0.title, done: $0.done)
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            if let data, let entry = decode(data) {
+                UserDefaults.standard.set(data, forKey: cacheKey)
+                completion(entry)
+                return
             }
-            let storedPending = defaults.object(forKey: pendingKey) as? Int
-            let pending = storedPending ?? items.filter { !$0.done }.count
-            return TodoEntry(
-                date: Date(),
-                items: items,
-                pending: pending,
-                sharedStorageAvailable: true
-            )
-        } catch {
-            return .empty
+
+            // Сети нет — показываем последнее, что удалось загрузить.
+            if let cached = UserDefaults.standard.data(forKey: cacheKey),
+               let entry = decode(cached) {
+                completion(entry)
+                return
+            }
+
+            completion(.message(.failed))
+        }.resume()
+    }
+
+    private static func decode(_ data: Data) -> TodoEntry? {
+        guard let payload = try? JSONDecoder().decode([TodoPayload].self, from: data) else {
+            return nil
         }
+        let items = payload.map {
+            TodoItem(id: $0.id, title: $0.title, done: $0.done)
+        }
+        return TodoEntry(
+            date: Date(),
+            items: items,
+            pending: items.filter { !$0.done }.count,
+            state: items.isEmpty ? .empty : .ok
+        )
     }
 }
 
@@ -124,16 +131,20 @@ struct Provider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodoEntry) -> Void) {
-        completion(context.isPreview ? .placeholder : TodoSharedStorage.load())
+        if context.isPreview {
+            completion(.placeholder)
+            return
+        }
+        TodoRemoteSource.load(completion: completion)
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<TodoEntry>) -> Void) {
-        let entry = TodoSharedStorage.load()
-
-        // Основной сценарий: приложение само просит перерисовать виджет через
-        // WidgetCenter.reloadTimelines(ofKind:). Резервное обновление — раз в 15 минут.
-        let next = Date().addingTimeInterval(15 * 60)
-        completion(Timeline(entries: [entry], policy: .after(next)))
+        TodoRemoteSource.load { entry in
+            // Основное обновление инициирует приложение вызовом
+            // WidgetCenter.reloadTimelines; резервное — раз в 30 минут.
+            let next = Date().addingTimeInterval(30 * 60)
+            completion(Timeline(entries: [entry], policy: .after(next)))
+        }
     }
 }
 
@@ -163,25 +174,7 @@ struct TodoWidgetEntryView: View {
         VStack(alignment: .leading, spacing: 6) {
             header
 
-            if entry.items.isEmpty {
-                Spacer(minLength: 0)
-                if entry.sharedStorageAvailable {
-                    Text("Задач пока нет")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("Добавьте их в приложении")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("Нет доступа к общему хранилищу")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("App Group не активирована")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer(minLength: 0)
-            } else {
+            if entry.state == .ok {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(visibleItems) { item in
                         row(for: item)
@@ -193,17 +186,50 @@ struct TodoWidgetEntryView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+            } else {
+                Spacer(minLength: 0)
+                messageView
+                Spacer(minLength: 0)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .widgetContainerBackground()
     }
 
+    @ViewBuilder
+    private var messageView: some View {
+        switch entry.state {
+        case .empty:
+            Text("Задач пока нет")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("Добавьте их в приложении")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        case .notConfigured:
+            Text("Виджет не настроен")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("Задайте TODO_GIST_URL при сборке")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        case .failed:
+            Text("Нет данных")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("Проверьте интернет и настройки")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        case .ok:
+            EmptyView()
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 6) {
             Image(systemName: "checklist")
                 .font(.caption)
-            Text("Осталось: \(entry.pending)")
+            Text(entry.state == .ok ? "Осталось: \(entry.pending)" : "Список дел")
                 .font(.caption)
                 .fontWeight(.semibold)
             Spacer(minLength: 0)

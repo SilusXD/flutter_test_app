@@ -125,6 +125,29 @@ jobs:
       # --- Виджет на главный экран ------------------------------------------------
       # Виджет собирается ОТДЕЛЬНЫМ Xcode-проектом (ios/TodoWidget), поэтому
       # Flutter-проект (ios/Runner.xcodeproj) остаётся неизменным.
+      # Виджет не может читать настройки приложения: App Group на бесплатном Apple ID
+      # недоступна. Поэтому адрес данных (raw-URL приватного Gist) подставляется
+      # в Swift-код на этапе сборки из секрета репозитория.
+      - name: Inject widget data URL
+        env:
+          TODO_GIST_URL: ${{ secrets.TODO_GIST_URL }}
+        run: |
+          set -euo pipefail
+          WIDGET_SWIFT="ios/TodoWidget/TodoWidget/TodoWidget.swift"
+
+          if [ -z "${TODO_GIST_URL:-}" ]; then
+            echo "Секрет TODO_GIST_URL не задан."
+            echo "Виджет соберётся с заглушкой «Виджет не настроен»."
+            echo "Добавьте секрет: Settings → Secrets and variables → Actions → TODO_GIST_URL"
+          else
+            # Экранируем & — в sed он означает «всё найденное совпадение».
+            ESCAPED="${TODO_GIST_URL//&/\\&}"
+            # macOS-версия sed требует пустой аргумент после -i.
+            sed -i '' "s|__TODO_GIST_URL__|${ESCAPED}|g" "$WIDGET_SWIFT"
+            echo "Адрес подставлен в виджет:"
+            grep -n 'gistRawURL =' "$WIDGET_SWIFT" | head -2
+          fi
+
       - name: Build widget extension
         run: |
           set -euo pipefail
@@ -313,8 +336,13 @@ jobs:
           4. Добавьте задачи в приложении — виджет обновится сам.
 
           Бесплатный Apple ID: 3 приложения (включая SideStore), 7 дней до переподписи.
-          Важно: App Group официально требует платный Apple Developer (\$99/год).
-          Если группа не активируется, виджет покажет «Задач пока нет».
+
+          Виджет: App Group на бесплатном Apple ID недоступна, поэтому задачи
+          передаются через приватный GitHub Gist. Чтобы виджет заработал:
+          1. Задайте секрет репозитория TODO_GIST_URL (raw-URL файла todos.json).
+          2. Пересоберите приложение (workflow запускается вручную).
+          3. В приложении: иконка шестерёнки → вставьте тот же raw-URL и GitHub-токен
+             со scope «gist» → «Проверить связь» → «Сохранить».
           Подробности: docs/IOS_SIDESTORE_GUIDE.md
           EOF
           )

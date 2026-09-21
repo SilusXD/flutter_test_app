@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../models/todo.dart';
 import '../services/todo_store.dart';
 import '../widgets/todo_tile.dart';
+import 'settings_screen.dart';
 
 /// Экран списка дел: добавление, отметка выполнения и удаление задач.
 ///
@@ -60,13 +61,23 @@ class _TodoListScreenState extends State<TodoListScreen> {
         ..addAll(saved);
       _restored = true;
     });
-    // Обновляем виджет сразу после запуска: например, если приложение
-    // переустановили, но общий контейнер сохранился.
-    final WidgetSyncStatus status = await _store.publishToWidget(_todos);
+    // Сразу отправляем текущее состояние: виджет получит актуальные данные
+    // после переустановки, а ошибка настройки станет видна пользователю.
+    final WidgetSyncStatus status = await _store.sync(Todo.listToJson(_todos));
     if (!mounted) {
       return;
     }
     setState(() => _widgetStatus = status);
+  }
+
+  /// Открывает настройки обмена данными с виджетом.
+  Future<void> _openSettings() async {
+    final bool? saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(builder: (BuildContext _) => const SettingsScreen()),
+    );
+    if (saved == true) {
+      await _saveAndSync();
+    }
   }
 
   void _persist() {
@@ -144,6 +155,11 @@ class _TodoListScreenState extends State<TodoListScreen> {
               icon: const Icon(Icons.delete_sweep_outlined),
               tooltip: 'Удалить выполненные',
             ),
+          IconButton(
+            onPressed: _openSettings,
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Настройки виджета',
+          ),
         ],
       ),
       body: Column(
@@ -152,7 +168,10 @@ class _TodoListScreenState extends State<TodoListScreen> {
             _SummaryBar(remaining: remaining, total: _todos.length),
           if (_widgetStatus != null &&
               _widgetStatus != WidgetSyncStatus.notApplicable)
-            _WidgetStatusBar(status: _widgetStatus!),
+            _WidgetStatusBar(
+              status: _widgetStatus!,
+              detail: _store.lastError,
+            ),
           Expanded(
             child: _todos.isEmpty
                 ? const _EmptyState()
@@ -187,9 +206,12 @@ class _TodoListScreenState extends State<TodoListScreen> {
 /// Нужна для диагностики на самом устройстве: если виджет пуст, здесь видно,
 /// дошли ли данные до общего контейнера.
 class _WidgetStatusBar extends StatelessWidget {
-  const _WidgetStatusBar({required this.status});
+  const _WidgetStatusBar({required this.status, this.detail});
 
   final WidgetSyncStatus status;
+
+  /// Текст ошибки, если она была: помогает понять причину без логов и Xcode.
+  final String? detail;
 
   @override
   Widget build(BuildContext context) {
@@ -216,7 +238,9 @@ class _WidgetStatusBar extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              status.shortMessage,
+              problem && detail != null
+                  ? '${status.shortMessage} — $detail'
+                  : status.shortMessage,
               style: theme.textTheme.labelMedium?.copyWith(color: foreground),
             ),
           ),

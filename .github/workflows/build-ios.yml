@@ -99,9 +99,16 @@ jobs:
       # использует CocoaPods. Podfile генерируется инструментами Flutter и в git не
       # хранится — создаём его заранее, иначе pod install упадёт с
       # "No Podfile found in the project directory".
+      #
+      # --no-codesign обязателен даже для config-only: без него Flutter проверяет
+      # наличие сертификата разработчика и падает с
+      # "No valid code signing certificates were found" (на раннере сертификатов нет).
       - name: Generate Podfile (config only)
-        run: flutter build ios --config-only
+        run: flutter build ios --config-only --no-codesign
 
+      # Flutter обычно уже выполнил pod install прямо на шаге config-only
+      # (processPodsIfNeeded вызывается раньше проверки configOnly), поэтому шаг
+      # идемпотентен: он нужен для явной установки подов и наглядного лога.
       - name: CocoaPods install
         run: |
           cd ios

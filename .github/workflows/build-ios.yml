@@ -173,20 +173,40 @@ jobs:
             codesign --force --sign - "$framework"
           done
 
+          # --generate-entitlement-der: современная подпись хранит entitlements ещё
+          # и в DER-форме. Xcode делает так всегда; установщики (iloader/SideStore),
+          # которые читают entitlements из подписи, без неё могут их не увидеть.
           echo "--- подпись расширения виджета ---"
-          codesign --force --sign - \
+          codesign --force --sign - --generate-entitlement-der \
             --entitlements ios/TodoWidget/TodoWidget/TodoWidget.entitlements \
             "$APP_PATH/PlugIns/TodoWidget.appex"
 
           echo "--- подпись приложения ---"
-          codesign --force --sign - \
+          codesign --force --sign - --generate-entitlement-der \
             --entitlements ios/Runner/Runner.entitlements \
             "$APP_PATH"
 
+          # Проверяем, что App Group действительно попала в подпись: если её там нет,
+          # виджет на устройстве не получит общий контейнер (что и наблюдалось).
           echo "--- entitlements приложения ---"
-          codesign -d --entitlements - "$APP_PATH" 2>&1 | head -20 || true
+          APP_ENTITLEMENTS=$(codesign -d --entitlements - "$APP_PATH" 2>&1 || true)
+          echo "$APP_ENTITLEMENTS" | head -20
+          if echo "$APP_ENTITLEMENTS" | grep -q 'application-groups'; then
+            echo "OK: App Group есть в подписи приложения"
+          else
+            echo "ОШИБКА: в подписи приложения нет application-groups" >&2
+            exit 1
+          fi
+
           echo "--- entitlements виджета ---"
-          codesign -d --entitlements - "$APP_PATH/PlugIns/TodoWidget.appex" 2>&1 | head -20 || true
+          WIDGET_ENTITLEMENTS=$(codesign -d --entitlements - "$APP_PATH/PlugIns/TodoWidget.appex" 2>&1 || true)
+          echo "$WIDGET_ENTITLEMENTS" | head -20
+          if echo "$WIDGET_ENTITLEMENTS" | grep -q 'application-groups'; then
+            echo "OK: App Group есть в подписи расширения"
+          else
+            echo "ОШИБКА: в подписи расширения нет application-groups" >&2
+            exit 1
+          fi
 
       - name: Determine app version
         id: app_version
